@@ -96,7 +96,7 @@ void init(OptionsMap& o) {
   o["Analysis Contempt"]     << Option("Both var Off var White var Black var Both", "Both");
   o["Threads"]               << Option(1, 1, 512, on_threads);
   o["Hash"]                  << Option(16, 1, MaxHashMB, on_hash_size);
-  o["Large Pages"]           << Option(false, on_large_pages);
+  o["Large Pages"]           << Option(true, on_large_pages);
   o["Clear Hash"]            << Option(on_clear_hash);
   o["Ponder"]                << Option(false);
   o["MultiPV"]               << Option(1, 1, 500);
