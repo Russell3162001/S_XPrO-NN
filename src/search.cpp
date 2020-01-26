@@ -1131,7 +1131,6 @@ namespace {
     if (depth >= 7 && !ttMove)
     {
         search<NT>(pos, ss, alpha, beta, depth - 7, cutNode);
-
         tte = TT.probe(posKey, ttHit);
         ttValue = ttHit ? value_from_tt(tte->value(), ss->ply, pos.rule50_count()) : VALUE_NONE;
         ttMove = ttHit ? tte->move() : MOVE_NONE;
