@@ -693,7 +693,7 @@ void Thread::search() {
                   Threads.stop = true;
           }
           else if (   Threads.increaseDepth
-		           && !mainThread->ponder
+                   && !mainThread->ponder
                    && Time.elapsed() > Time.optimum() * fallingEval * reduction * bestMoveInstability * 0.6)
                    Threads.increaseDepth = false;
           else
@@ -761,6 +761,11 @@ namespace {
     Piece movedPiece;
     int moveCount, captureCount, quietCount;
 	bool updatedLearning = false;
+	
+	//flags to preserve node tyepes
+	bool disableLMR = false;
+	bool disableNMP = false;
+	bool expectedPVNode =  false;
 
     // Step 1. Initialize node
     Thread* thisThread = pos.this_thread();
@@ -859,67 +864,86 @@ namespace {
                 update_continuation_histories(ss, pos.moved_piece(ttMove), to_sq(ttMove), penalty);
             }
         }
-        return ttValue;
+        if (pos.rule50_count() < 90)
+            return ttValue;
     }
     if(persistedSelfLearning)
     {
-      expTTHit = false;
-      updatedLearning = false;
-
-      if (!excludedMove && useLearning)
-      {
-	Node node = getNodeFromHT(posKey,HashTableType::global);
-	if (node!=nullptr)
-	{
-	    MoveInfo moveInfo = node->latestMoveInfo;
-	    if (node->hashKey == posKey)
+	    //Step 4Bis. Global Learning Table lookup
+	    expTTHit = false;
+	    updatedLearning = false;
+	
+	    if (!excludedMove && useLearning)
 	    {
-	      bool haveTTMove = false;
-	      if (ttMove)
-		haveTTMove = true;
-	      enabledLearningProbe = true;
-	      expTTHit = true;
-	      if (!haveTTMove)
+	      Node node = getNodeFromHT(posKey,HashTableType::global);
+	      if (node!=nullptr)
 	      {
-		  ttMove = node->latestMoveInfo.move;
-	      }
-	      if (((node->latestMoveInfo.depth >= depth)||(node->latestMoveInfo.performance>=50)))
-	      {
-		expTTMove = node->latestMoveInfo.move;
-		expTTValue = node->latestMoveInfo.score;
-		updatedLearning = true;
-	      }
-	      if (node->latestMoveInfo.depth == 0)
-		updatedLearning = false;
-	      if (!PvNode && updatedLearning && ((moveInfo.depth >= depth)||(moveInfo.performance>=50)))
-	      {
-		if (expTTValue >= beta)
-		{
-		  if (!pos.capture_or_promotion(moveInfo.move))
-		    update_quiet_stats(pos, ss, moveInfo.move, stat_bonus(depth));
-
-		  // Extra penalty for a quiet TT move in previous ply when it gets refuted
-		  if ((ss - 1)->moveCount == 1 && !pos.captured_piece())
-		    update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -stat_bonus(depth + 1));
-		}
-		// Penalty for a quiet ttMove that fails low
+		  MoveInfo moveInfo = node->latestMoveInfo;
+		  enabledLearningProbe = true;
+		  expTTHit = true;
+		  if (!ttMove)
+		  {
+		      ttMove = moveInfo.move;
+		  }
+		  if (((moveInfo.depth >= depth)||(moveInfo.performance>=50)))
+		  {
+		    expTTMove = moveInfo.move;
+		    expTTValue = moveInfo.score;
+		    updatedLearning = true;
+		  }
+		  if ((moveInfo.depth == 0))
+		    updatedLearning = false;
+		  if(updatedLearning
+		      && expTTValue != VALUE_NONE )
+		  {
+			  if(expTTValue >= beta)
+			  {
+				  disableLMR = true;
+			  }
+			  if(expTTValue < alpha)
+			  {
+				  disableNMP = true;
+			  }
+			  if(expTTValue > alpha && expTTValue < beta)
+			  {
+				  expectedPVNode = true;
+				  improving = true;
+			  }
+		  }
+		  // At non-PV nodes we check for an early Global Learning Table cutoff
+		  // If expTTMove is quiet, update move sorting heuristics on global learning table hit
+		  if (!PvNode
+		      && updatedLearning
+		      && expTTValue != VALUE_NONE // Possible in case of Global Learning Table access race
+		      && ((moveInfo.depth >= depth)||(moveInfo.performance>=50)))
+		  {
+		    if (expTTValue >= beta)
+		    {
+		      if (!pos.capture_or_promotion(moveInfo.move))
+			update_quiet_stats(pos, ss, moveInfo.move, stat_bonus(depth));
+	
+		      // Extra penalty for early quiet moves of the previous ply
+		      if ((ss - 1)->moveCount <= 2 && !priorCapture)
+			update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -stat_bonus(depth + 1));
+		    }
+		    // Penalty for a quiet ttMove that fails low
 		    else
 		    {
-			  if (!pos.capture_or_promotion(expTTMove))
-			  {
-				  int penalty = -stat_bonus(depth);
-				  thisThread->mainHistory[us][from_to(expTTMove)] << penalty;
-				  update_continuation_histories(ss, pos.moved_piece(expTTMove), to_sq(expTTMove), penalty);
-			  }
+		      if (!pos.capture_or_promotion(expTTMove))
+		      {
+			int penalty = -stat_bonus(depth);
+			thisThread->mainHistory[us][from_to(expTTMove)] << penalty;
+			update_continuation_histories(ss, pos.moved_piece(expTTMove), to_sq(expTTMove), penalty);
+		      }
 		    }
 		    //thisThread->tbHits.fetch_add(1, std::memory_order_relaxed);
-			if (pos.rule50_count() < 90)
-		        return expTTValue;
+		    if (pos.rule50_count() < 90)
+		      return expTTValue;
+		  }
 	      }
 	    }
-	}
-      }
     }
+
 
     // Step 5. Tablebases probe
     if (!rootNode && TB::Cardinality)
@@ -1013,12 +1037,13 @@ namespace {
       }
       else
       {
-		// Never assume anything on values stored in TT
+		// Never assume anything on values stored in Global Learning Table
 		ss->staticEval = eval = expTTValue;
 		if (eval == VALUE_NONE)
 		{ 
 		  ss->staticEval = eval = evaluate(pos);
 		}
+		// Can expTTValue be used as a better position evaluation?
 		if(expTTValue != VALUE_NONE)
 		  eval = expTTValue;
       }
@@ -1030,9 +1055,12 @@ namespace {
         &&  eval <= alpha - RazorMargin)
         return qsearch<NT>(pos, ss, alpha, beta);
 
+    //from Kelly begin
+    if(!expectedPVNode)
+    {
     improving =  (ss-2)->staticEval == VALUE_NONE ? (ss->staticEval > (ss-4)->staticEval
               || (ss-4)->staticEval == VALUE_NONE) : ss->staticEval > (ss-2)->staticEval;
-
+    }
     // Step 8. Futility pruning: child node (~50 Elo)
     if (   !PvNode
         &&  depth < 6
@@ -1042,11 +1070,12 @@ namespace {
 
     // Step 9. Null move search with verification search (~40 Elo)
     if (   !PvNode
+		&&  !disableNMP 
         && (ss-1)->currentMove != MOVE_NULL
         && (ss-1)->statScore < 23397
         &&  eval >= beta
         &&  eval >= ss->staticEval
-        &&  ss->staticEval >= beta - 32 * depth + 292 - improving * 30
+        &&  ss->staticEval >= beta - 32 * depth - 30 * improving + 120 * ttPv + 292
         && !excludedMove
         &&  pos.non_pawn_material(us)
         && (ss->ply >= thisThread->nmpMinPly || us != thisThread->nmpColor))
@@ -1058,9 +1087,13 @@ namespace {
 
         ss->currentMove = MOVE_NULL;
         ss->continuationHistory = &thisThread->continuationHistory[0][0][NO_PIECE][0];
+
         pos.do_null_move(st);
+
         Value nullValue = -search<NonPV>(pos, ss+1, -beta, -beta+1, depth-R, !cutNode);
+
         pos.undo_null_move();
+
         if (nullValue >= beta)
         {
             // Do not return unproven mate scores
@@ -1069,6 +1102,7 @@ namespace {
 
             if (thisThread->nmpMinPly || (abs(beta) < VALUE_KNOWN_WIN && depth < 13))
                 return nullValue;
+
             assert(!thisThread->nmpMinPly); // Recursive verification is not allowed
 
             // Do verification search at high depths, with null move pruning disabled
@@ -1077,6 +1111,7 @@ namespace {
             thisThread->nmpColor = us;
 
             Value v = search<NonPV>(pos, ss, beta-1, beta, depth-R, false);
+
             thisThread->nmpMinPly = 0;
 
             if (v >= beta)
@@ -1088,6 +1123,7 @@ namespace {
     // If we have a good enough capture and a reduced search returns a value
     // much above beta, we can (almost) safely prune the previous move.
     if (   !PvNode
+		&&  !disableNMP
         &&  depth >= 5
         &&  abs(beta) < VALUE_MATE_IN_MAX_PLY)
     {
@@ -1131,6 +1167,7 @@ namespace {
     if (depth >= 7 && !ttMove)
     {
         search<NT>(pos, ss, alpha, beta, depth - 7, cutNode);
+
         tte = TT.probe(posKey, ttHit);
         ttValue = ttHit ? value_from_tt(tte->value(), ss->ply, pos.rule50_count()) : VALUE_NONE;
         ttMove = ttHit ? tte->move() : MOVE_NONE;
@@ -1152,7 +1189,6 @@ moves_loop: // When in check, search starts from here
 
     value = bestValue;
     singularLMR = moveCountPruning = false;
-    bool isSingularExtension = false;//from Kelly
     ttCapture = ttMove && pos.capture_or_promotion(ttMove);
 
     // Mark this node as being searched
@@ -1203,12 +1239,6 @@ moves_loop: // When in check, search starts from here
           if (   !captureOrPromotion
               && !givesCheck)
           {
-              //from Kelly begin
-              if (isSingularExtension && moveCount > 1)
-	      	  {
-            	  continue;
-	      	  }
-
               // Reduced depth of the next LMR search
               int lmrDepth = std::max(newDepth - reduction(improving, depth, moveCount), 0);
 
@@ -1233,11 +1263,7 @@ moves_loop: // When in check, search starts from here
                   continue;
           }
           else if (!pos.see_ge(move, Value(-194) * depth)) // (~25 Elo)
-          {
-              if (captureOrPromotion && captureCount < 32)
-                  capturesSearched[captureCount++] = move;
               continue;
-          }
       }
 
       // Step 14. Extensions (~75 Elo)
@@ -1267,10 +1293,6 @@ moves_loop: // When in check, search starts from here
           {
               extension = 1;
               singularLMR = true;
-			  if(persistedSelfLearning && expTTHit && move == expTTMove)
-			  	{
-			      isSingularExtension = true;
-			    }
           }
 
           // Multi-cut pruning
@@ -1328,7 +1350,8 @@ moves_loop: // When in check, search starts from here
       // Step 16. Reduced depth search (LMR, ~200 Elo). If the move fails high it will be
       // re-searched at full depth.
       if (    depth >= 3
-          &&  moveCount > 1 + rootNode + (rootNode && bestValue < alpha)
+          &&  !disableLMR
+          &&  moveCount > 1 + 2 * rootNode
           && (!rootNode || thisThread->best_move_count(move) == 0)
           && (  !captureOrPromotion
               || moveCountPruning

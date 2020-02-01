@@ -35,7 +35,10 @@ namespace PSQT {
 }
 
 int main(int argc, char* argv[]) {
-
+  {
+    std::time_t result = std::time(NULL);
+    std::cout << std::asctime(std::localtime(&result));
+  }
   std::cout << engine_info() << std::endl;
 
   UCI::init(Options);

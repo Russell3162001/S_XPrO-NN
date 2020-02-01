@@ -149,6 +149,8 @@ void Try_Get_LockMemory_Privileges()
 
 void TranspositionTable::resize(size_t mbSize) {
 
+  Threads.main()->wait_for_search_finished();
+
   if (mbSize == 0)
       mbSize = mbSize_last_used;
 
